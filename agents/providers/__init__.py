@@ -1,25 +1,43 @@
 """providers - Provider abstraction layer.
 
-Phase 3A: unified types + AnthropicAdapter only. OpenAI-compatible
-adapter, router, model registry and /model switching come in 3B/3C/3D.
+Phase 3A: unified types + AnthropicAdapter only. Phase 3B adds the
+OpenAI-compatible adapter + canonical message conversion. Router, model
+registry and /model switching come in 3C/3D.
 """
 
 from agents.providers.anthropic_adapter import AnthropicAdapter
 from agents.providers.base import ProviderAdapter
+from agents.providers.message_codec import render_openai, to_canonical
+from agents.providers.openai_compatible_adapter import (
+    OpenAICompatibleAdapter,
+    OpenAICompatibleConfig,
+    OpenAICompatibleHTTPError,
+)
 from agents.providers.types import (
+    AssistantMessage,
     ModelRequest,
     ModelResponse,
     StopReason,
     TokenUsage,
     ToolCall,
+    ToolResultMessage,
+    UserMessage,
 )
 
 __all__ = [
     "AnthropicAdapter",
     "ProviderAdapter",
+    "OpenAICompatibleAdapter",
+    "OpenAICompatibleConfig",
+    "OpenAICompatibleHTTPError",
     "ModelRequest",
     "ModelResponse",
     "StopReason",
     "TokenUsage",
     "ToolCall",
+    "UserMessage",
+    "AssistantMessage",
+    "ToolResultMessage",
+    "to_canonical",
+    "render_openai",
 ]

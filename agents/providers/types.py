@@ -24,6 +24,7 @@ class StopReason(str, Enum):
     TOOL_CALL = "tool_call"
     LENGTH = "length"
     STOP_SEQUENCE = "stop_sequence"
+    CONTENT_FILTER = "content_filter"
     UNKNOWN = "unknown"
 
 
@@ -78,3 +79,32 @@ class ModelResponse:
     provider: str = "unknown"
     raw_response: Any = None
     provider_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Canonical conversation messages (Phase 3B, minimal).
+#
+# The Harness Agent Loop still produces the legacy wire-shaped messages
+# dicts (D-1). Phase 3B introduces a canonical conversion LAYER that
+# ACCEPTS BOTH the legacy shape and these canonical dataclasses, and
+# converts to provider wire format inside each adapter. We do NOT rewrite
+# session/compression/trace message structures in 3B.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class UserMessage:
+    content: str | list[Any]
+
+
+@dataclass
+class AssistantMessage:
+    text: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+
+
+@dataclass
+class ToolResultMessage:
+    tool_call_id: str
+    content: str
+    is_error: bool = False
