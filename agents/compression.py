@@ -11,6 +11,13 @@ import json
 import time
 
 from agents.config import TRANSCRIPT_DIR, client, MODEL
+from agents.providers import AnthropicAdapter, ModelRequest
+
+# Phase 3A-1: the ONLY model-call path for auto_compact. Resolves
+# ``client`` lazily from this module's globals so module-global client
+# injection (tests swapping compression.__globals__["client"]) keeps
+# working unchanged.
+_ANTHROPIC_ADAPTER = AnthropicAdapter(client_provider=lambda: client)
 
 
 def estimate_tokens(messages: list) -> int:
@@ -40,12 +47,12 @@ def auto_compact(messages: list) -> list:
         for msg in messages:
             f.write(json.dumps(msg, default=str) + "\n")
     conv_text = json.dumps(messages, default=str)[-80000:]
-    resp = client.messages.create(
+    response = _ANTHROPIC_ADAPTER.complete(ModelRequest(
         model=MODEL,
         messages=[{"role": "user", "content": f"Summarize for continuity:\n{conv_text}"}],
         max_tokens=2000,
-    )
-    summary = resp.content[0].text
+    ))
+    summary = response.text
     return [
         {"role": "user", "content": f"[Compressed. Transcript: {path}]\n{summary}"},
     ]

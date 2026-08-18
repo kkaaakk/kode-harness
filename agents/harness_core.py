@@ -44,6 +44,11 @@ from agents.base_tools import (
     set_secure_bash_context,
     reset_secure_bash_context,
 )
+from agents.providers import AnthropicAdapter, ModelRequest, StopReason
+# Phase 3A-1: the ONLY model-call path for the Agent Loop. Resolves
+# ``client`` lazily from this module's globals so tests that patch
+# module.client.messages.create keep working unchanged.
+ANTHROPIC_ADAPTER = AnthropicAdapter(client_provider=lambda: client)
 from agents.todo_manager import TodoManager
 from agents.skill_loader import SkillLoader
 from agents.compression import estimate_tokens, microcompact, auto_compact
@@ -1347,9 +1352,26 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
                 agent_error = pre_model_outcome.block_reason
                 return
 
-            # LLM call
-            response = client.messages.create(**model_request_kwargs)
-            messages.append({"role": "assistant", "content": response.content})
+            # LLM call (Phase 3A-1: via AnthropicAdapter; errors pass
+            # through unwrapped, D-3).
+            response = ANTHROPIC_ADAPTER.complete(ModelRequest(
+                model=model_request_kwargs.get("model", MODEL),
+                messages=model_request_kwargs.get("messages", messages),
+                tools=model_request_kwargs.get("tools"),
+                system=model_request_kwargs.get("system"),
+                max_tokens=model_request_kwargs.get("max_tokens"),
+                temperature=model_request_kwargs.get("temperature"),
+                # 3A bridge: extension-patched request kwargs without a
+                # unified field reach the client verbatim.
+                metadata={
+                    k: v for k, v in model_request_kwargs.items()
+                    if k not in (
+                        "model", "messages", "tools", "system",
+                        "max_tokens", "temperature",
+                    )
+                },
+            ))
+            messages.append({"role": "assistant", "content": response.raw_response.content})
 
             # HOOK 3/8: AFTER_MODEL_RESPONSE
             post_model_outcome = EXTENSIONS.emit(Event.AFTER_MODEL_RESPONSE, {
@@ -1363,85 +1385,82 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
 
             # Emit events for streaming frontend
             if event_callback:
-                # Token usage event (from response.usage, if present)
-                usage = getattr(response, "usage", None)
+                # Token usage event (from ModelResponse.usage, if present)
+                usage = response.usage
                 if usage is not None:
-                    in_tok = getattr(usage, "input_tokens", 0) or 0
-                    out_tok = getattr(usage, "output_tokens", 0) or 0
+                    in_tok = usage.input_tokens
+                    out_tok = usage.output_tokens
                     event_callback({
                         "type": "tokens",
                         "input": in_tok,
                         "output": out_tok,
                         "tokens": in_tok + out_tok,
                     })
-                for block in response.content:
-                    if hasattr(block, "type"):
-                        if block.type == "text" and block.text:
-                            event_callback({"type": "text", "text": block.text})
-                        elif block.type == "tool_use":
-                            event_callback({
-                                "type": "tool_call",
-                                "name": block.name,
-                                "id": block.id,
-                                "input": block.input,
-                            })
+                if response.text:
+                    event_callback({"type": "text", "text": response.text})
+                for tc in response.tool_calls:
+                    event_callback({
+                        "type": "tool_call",
+                        "name": tc.name,
+                        "id": tc.id,
+                        "input": tc.arguments,
+                    })
 
-            if response.stop_reason != "tool_use":
+            if response.stop_reason != StopReason.TOOL_CALL:
                 # Loop ending normally. AGENT_END fires in finally.
                 return
             # Tool execution
             results = []
             used_todo = False
             manual_compress = False
-            for block in response.content:
-                if block.type == "tool_use":
-                    if block.name == "compress":
-                        manual_compress = True
+            for tc in response.tool_calls:
+                if tc.name == "compress":
+                    manual_compress = True
 
-                    # HOOK 4/8: BEFORE_TOOL_CALL
-                    tool_ctx = {
-                        "event": Event.BEFORE_TOOL_CALL,
-                        "tool_name": block.name,
-                        "tool_use_id": block.id,
-                        "tool_args": dict(block.input) if isinstance(block.input, dict) else {},
-                        "actor": "lead",
-                    }
-                    pre_tool_outcome = EXTENSIONS.emit(Event.BEFORE_TOOL_CALL, tool_ctx)
-                    # Apply tool_args_patch (no-op when empty)
-                    effective_args = dict(block.input) if isinstance(block.input, dict) else {}
-                    if pre_tool_outcome.tool_args_patch:
-                        effective_args.update(pre_tool_outcome.tool_args_patch)
+                # HOOK 4/8: BEFORE_TOOL_CALL
+                tool_ctx = {
+                    "event": Event.BEFORE_TOOL_CALL,
+                    "tool_name": tc.name,
+                    "tool_use_id": tc.id,
+                    "tool_args": dict(tc.arguments),
+                    "actor": "lead",
+                }
+                pre_tool_outcome = EXTENSIONS.emit(Event.BEFORE_TOOL_CALL, tool_ctx)
+                # Apply tool_args_patch (no-op when empty)
+                effective_args = dict(tc.arguments)
+                if pre_tool_outcome.tool_args_patch:
+                    effective_args.update(pre_tool_outcome.tool_args_patch)
 
-                    if pre_tool_outcome.blocked:
-                        # TOOL-LEVEL BLOCK: this single tool call is denied.
-                        # The agent is NOT marked "blocked" — the model can
-                        # still continue reasoning with other tools or
-                        # produce a final text answer. Only BEFORE_AGENT_START
-                        # and BEFORE_MODEL_REQUEST blocks set agent_status to
-                        # "blocked" (Agent-level block).
-                        output = f"Blocked by extension: {pre_tool_outcome.block_reason or 'no reason'}"
-                        print(f"> {block.name}: BLOCKED")
-                    else:
-                        # Stage 2C-B1.4: Artifact-root guard for path-based
-                        # tools. read_file additionally supports artifact://
-                        # URI routing. See ``_execute_tool_or_artifact_read``
-                        # for the full contract and known limitation.
-                        output = _execute_tool_or_artifact_read(
-                            block.name,
-                            effective_args,
-                            active_handlers,
-                            tool_profile,
-                            call_store=_call_store,
-                            call_session_id=_call_session_id,
-                            call_registry=_call_registry,
-                        )
-                    print(f"> {block.name}:")
+                if pre_tool_outcome.blocked:
+                    # TOOL-LEVEL BLOCK: this single tool call is denied.
+                    # The agent is NOT marked "blocked" — the model can
+                    # still continue reasoning with other tools or
+                    # produce a final text answer. Only BEFORE_AGENT_START
+                    # and BEFORE_MODEL_REQUEST blocks set agent_status to
+                    # "blocked" (Agent-level block).
+                    output = f"Blocked by extension: {pre_tool_outcome.block_reason or 'no reason'}"
+                    print(f"> {tc.name}: BLOCKED")
+                else:
+                    # Stage 2C-B1.4: Artifact-root guard for path-based
+                    # tools. read_file additionally supports artifact://
+                    # URI routing. See ``_execute_tool_or_artifact_read``
+                    # for the full contract and known limitation.
+                    output = _execute_tool_or_artifact_read(
+                        tc.name,
+                        effective_args,
+                        active_handlers,
+                        tool_profile,
+                        call_store=_call_store,
+                        call_session_id=_call_session_id,
+                        call_registry=_call_registry,
+                    )
+                    print(f"> {tc.name}:")
                     print(str(output)[:200])
                     if event_callback:
                         event_callback({
                             "type": "tool_result",
-                            "name": block.name,
-                            "id": block.id,
+                            "name": tc.name,
+                            "id": tc.id,
                             "output": str(output)[:2000],
                         })
 
@@ -1454,15 +1473,15 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
                     # Stage 2C-B2A: BashExecutionResult with non-zero exit
                     # code is NOT a transport error — it still goes through
                     # policy so exit_code is preserved in metadata.
-                    if (block.name in _OUTPUT_POLICY_TOOLS
+                    if (tc.name in _OUTPUT_POLICY_TOOLS
                             and not pre_tool_outcome.blocked
                             and not _is_tool_error(output)):
                         _processed = _call_policy.process(
-                            tool_name=block.name,
+                            tool_name=tc.name,
                             raw_result=output,
                             context={
-                                "tool_use_id": block.id,
-                                "tool_args": block.input,
+                                "tool_use_id": tc.id,
+                                "tool_args": tc.arguments,
                             },
                         )
                         output = _processed.content
@@ -1470,8 +1489,8 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
                     # HOOK 5/8: AFTER_TOOL_RESULT
                     post_tool_outcome = EXTENSIONS.emit(Event.AFTER_TOOL_RESULT, {
                         "event": Event.AFTER_TOOL_RESULT,
-                        "tool_name": block.name,
-                        "tool_use_id": block.id,
+                        "tool_name": tc.name,
+                        "tool_use_id": tc.id,
                         "tool_result": output,
                         "tool_error": output if _is_tool_error(output) else None,
                     })
@@ -1488,16 +1507,16 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
                     # get emergency hard-truncation here. Extensions cannot
                     # bypass this.
                     output = _call_policy.enforce_final(
-                        tool_name=block.name,
+                        tool_name=tc.name,
                         content=output,
-                        context={"tool_use_id": block.id},
+                        context={"tool_use_id": tc.id},
                     )
 
-                    results.append(
-                        {"type": "tool_result", "tool_use_id": block.id, "content": str(output)}
-                    )
-                    if block.name == "TodoWrite":
-                        used_todo = True
+                results.append(
+                    {"type": "tool_result", "tool_use_id": tc.id, "content": str(output)}
+                )
+                if tc.name == "TodoWrite":
+                    used_todo = True
             # s03: nag reminder (only when todo workflow is active)
             rounds_without_todo = 0 if used_todo else rounds_without_todo + 1
             if TODO.has_open_items() and rounds_without_todo >= 3:

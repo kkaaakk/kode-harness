@@ -28,6 +28,15 @@ from agents.config import (
 )
 from agents.base_tools import run_bash, run_read, run_write, run_edit
 from agents.task_manager import TaskManager
+from agents.providers import AnthropicAdapter, ModelRequest, StopReason
+
+# Phase 3A-1: the ONLY model-call path for Team member _loop(). Resolves
+# ``client`` lazily from this module's globals so tests that swap
+# team_manager.__globals__["client"] keep working unchanged. D0/D2
+# runtime boundary untouched: own daemon thread, own 50-round loop,
+# hardcoded 7-tool set, no ToolRegistry, no agent_loop, max_tokens=8000,
+# shared BUS/TASK_MGR/Client/Model/Sandbox.
+_TEAM_ADAPTER = AnthropicAdapter(client_provider=lambda: client)
 
 
 # ---------------------------------------------------------------------------
@@ -243,56 +252,55 @@ class TeammateManager:
                         return
                     messages.append({"role": "user", "content": json.dumps(msg)})
                 try:
-                    response = client.messages.create(
+                    response = _TEAM_ADAPTER.complete(ModelRequest(
                         model=MODEL,
                         system=sys_prompt,
                         messages=messages,
                         tools=tools,
                         max_tokens=8000,
-                    )
+                    ))
                 except Exception:
                     self._set_status(name, "shutdown")
                     return
-                messages.append({"role": "assistant", "content": response.content})
-                if response.stop_reason != "tool_use":
+                messages.append({"role": "assistant", "content": response.raw_response.content})
+                if response.stop_reason != StopReason.TOOL_CALL:
                     break
                 results = []
                 idle_requested = False
-                for block in response.content:
-                    if block.type == "tool_use":
-                        if block.name == "idle":
-                            idle_requested = True
-                            output = "Entering idle phase."
-                        elif block.name == "claim_task":
-                            output = self.task_mgr.claim(
-                                block.input["task_id"], name
-                            )
-                        elif block.name == "send_message":
-                            output = self.bus.send(
-                                name, block.input["to"], block.input["content"]
-                            )
-                        else:
-                            dispatch = {
-                                "bash": lambda **kw: run_bash(kw["command"]),
-                                "read_file": lambda **kw: run_read(kw["path"]),
-                                "write_file": lambda **kw: run_write(
-                                    kw["path"], kw["content"]
-                                ),
-                                "edit_file": lambda **kw: run_edit(
-                                    kw["path"], kw["old_text"], kw["new_text"]
-                                ),
-                            }
-                            output = dispatch.get(
-                                block.name, lambda **kw: "Unknown"
-                            )(**block.input)
-                        print(f"  [{name}] {block.name}: {str(output)[:120]}")
-                        results.append(
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": str(output),
-                            }
+                for tc in response.tool_calls:
+                    if tc.name == "idle":
+                        idle_requested = True
+                        output = "Entering idle phase."
+                    elif tc.name == "claim_task":
+                        output = self.task_mgr.claim(
+                            tc.arguments["task_id"], name
                         )
+                    elif tc.name == "send_message":
+                        output = self.bus.send(
+                            name, tc.arguments["to"], tc.arguments["content"]
+                        )
+                    else:
+                        dispatch = {
+                            "bash": lambda **kw: run_bash(kw["command"]),
+                            "read_file": lambda **kw: run_read(kw["path"]),
+                            "write_file": lambda **kw: run_write(
+                                kw["path"], kw["content"]
+                            ),
+                            "edit_file": lambda **kw: run_edit(
+                                kw["path"], kw["old_text"], kw["new_text"]
+                            ),
+                        }
+                        output = dispatch.get(
+                            tc.name, lambda **kw: "Unknown"
+                        )(**tc.arguments)
+                    print(f"  [{name}] {tc.name}: {str(output)[:120]}")
+                    results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tc.id,
+                            "content": str(output),
+                        }
+                    )
                 messages.append({"role": "user", "content": results})
                 if idle_requested:
                     break

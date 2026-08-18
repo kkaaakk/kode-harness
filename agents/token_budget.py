@@ -272,12 +272,16 @@ def summarize_with_anthropic(
         f"<previous_summary>\n{previous_summary or '(none)'}\n</previous_summary>\n\n"
         f"<older_history>\n{history_text}\n</older_history>"
     )
-    response = client.messages.create(
+    # Phase 3A-1: via AnthropicAdapter (same client the caller passes).
+    from agents.providers import AnthropicAdapter, ModelRequest
+
+    adapter = AnthropicAdapter(client=client)
+    response = adapter.complete(ModelRequest(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=summary_max_tokens,
-    )
-    return _response_text(response)
+    ))
+    return response.text
 
 
 def _extract_memory_layers(
@@ -396,17 +400,6 @@ def _content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     return _json_dumps(content)
-
-
-def _response_text(response: Any) -> str:
-    chunks = []
-    for block in getattr(response, "content", []):
-        text = getattr(block, "text", None)
-        if text is not None:
-            chunks.append(text)
-        elif isinstance(block, dict) and "text" in block:
-            chunks.append(str(block["text"]))
-    return "".join(chunks)
 
 
 def _json_dumps(value: Any) -> str:
