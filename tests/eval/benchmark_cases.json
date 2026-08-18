@@ -1,0 +1,17 @@
+[
+  {
+    "id": "case_001_search_todo",
+    "task": "Find all Python files that contain the word TODO in the workspace",
+    "expected_tool": "grep_search"
+  },
+  {
+    "id": "case_002_list_markdown",
+    "task": "List all .md files in the workspace",
+    "expected_tool": "glob_search"
+  },
+  {
+    "id": "case_003_calculate",
+    "task": "Calculate the result of 123 * 456 using Python",
+    "expected_tool": "bash"
+  }
+]

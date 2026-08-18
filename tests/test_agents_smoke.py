@@ -15,8 +15,9 @@ AGENT_IDS = [path.name for path in AGENT_FILES]
 
 
 @pytest.mark.parametrize("agent_path", AGENT_FILES, ids=AGENT_IDS)
-def test_agent_scripts_compile(agent_path: Path) -> None:
-    _ = py_compile.compile(str(agent_path), doraise=True)
+def test_agent_scripts_compile(agent_path: Path, tmp_path: Path) -> None:
+    cfile = tmp_path / f"{agent_path.stem}.pyc"
+    _ = py_compile.compile(str(agent_path), cfile=str(cfile), doraise=True)
 
 
 def test_agent_scripts_exist() -> None:
