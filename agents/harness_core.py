@@ -176,8 +176,18 @@ LEGACY_25_TOOL_NAMES = [
     "grep_search", "glob_search",
 ]
 
+# Stage 2D-D3: single source of truth for legacy tool order slots.
+# Every extension registers with ``order=LEGACY_TOOL_ORDER[<name>]``; Base
+# tools use ``LEGACY_TOOL_ORDER[<name>]`` as well (all 25 slots are pinned
+# here, including the 12 Base slots). The per-tool LEGACY_*_ORDER constants
+# below are kept as thin aliases for backward compatibility - they read
+# from this dict, so there is exactly ONE place that pins the order.
+# Values are MECHANICALLY identical to the pre-D3 constants (0-indexed
+# slots in LEGACY_25_TOOL_NAMES); D3 changes no order values.
+LEGACY_TOOL_ORDER = {name: idx for idx, name in enumerate(LEGACY_25_TOOL_NAMES)}
+
 # The slot TodoWrite occupied in the pre-2D-B _TOOL_DEFS list (0-indexed).
-LEGACY_TODO_WRITE_ORDER = LEGACY_25_TOOL_NAMES.index("TodoWrite")  # == 4
+LEGACY_TODO_WRITE_ORDER = LEGACY_TOOL_ORDER["TodoWrite"]  # == 4
 
 # Schema for the TodoWrite tool. Unchanged from pre-2D-B; only the
 # registration ownership moved from Base to TodoExtension.
@@ -251,10 +261,10 @@ TASK_LIST_SCHEMA = {
 # The slots the four task tools occupied in the pre-2D-C _TOOL_DEFS list
 # (0-indexed). TaskExtension registers with these orders so the default
 # composed registry keeps the legacy 25-tool order.
-LEGACY_TASK_CREATE_ORDER = LEGACY_25_TOOL_NAMES.index("task_create")  # == 10
-LEGACY_TASK_GET_ORDER = LEGACY_25_TOOL_NAMES.index("task_get")        # == 11
-LEGACY_TASK_UPDATE_ORDER = LEGACY_25_TOOL_NAMES.index("task_update")  # == 12
-LEGACY_TASK_LIST_ORDER = LEGACY_25_TOOL_NAMES.index("task_list")      # == 13
+LEGACY_TASK_CREATE_ORDER = LEGACY_TOOL_ORDER["task_create"]  # == 10
+LEGACY_TASK_GET_ORDER = LEGACY_TOOL_ORDER["task_get"]        # == 11
+LEGACY_TASK_UPDATE_ORDER = LEGACY_TOOL_ORDER["task_update"]  # == 12
+LEGACY_TASK_LIST_ORDER = LEGACY_TOOL_ORDER["task_list"]      # == 13
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +290,7 @@ TASK_SUBAGENT_SCHEMA = {
 # The slot the "task" (subagent) tool occupied in the pre-2D-D1 _TOOL_DEFS
 # list (0-indexed == 5). SubagentExtension registers with this order so the
 # default composed registry keeps the legacy 25-tool order.
-LEGACY_SUBAGENT_ORDER = LEGACY_25_TOOL_NAMES.index("task")  # == 5
+LEGACY_SUBAGENT_ORDER = LEGACY_TOOL_ORDER["task"]  # == 5
 
 
 # ---------------------------------------------------------------------------
@@ -354,13 +364,13 @@ PLAN_APPROVAL_SCHEMA = {
     "required": ["request_id", "approve"],
 }
 
-LEGACY_SPAWN_TEAMMATE_ORDER = LEGACY_25_TOOL_NAMES.index("spawn_teammate")  # == 14
-LEGACY_LIST_TEAMMATES_ORDER = LEGACY_25_TOOL_NAMES.index("list_teammates")  # == 15
-LEGACY_SEND_MESSAGE_ORDER = LEGACY_25_TOOL_NAMES.index("send_message")      # == 16
-LEGACY_READ_INBOX_ORDER = LEGACY_25_TOOL_NAMES.index("read_inbox")          # == 17
-LEGACY_BROADCAST_ORDER = LEGACY_25_TOOL_NAMES.index("broadcast")            # == 18
-LEGACY_SHUTDOWN_REQUEST_ORDER = LEGACY_25_TOOL_NAMES.index("shutdown_request")  # == 19
-LEGACY_PLAN_APPROVAL_ORDER = LEGACY_25_TOOL_NAMES.index("plan_approval")    # == 20
+LEGACY_SPAWN_TEAMMATE_ORDER = LEGACY_TOOL_ORDER["spawn_teammate"]      # == 14
+LEGACY_LIST_TEAMMATES_ORDER = LEGACY_TOOL_ORDER["list_teammates"]      # == 15
+LEGACY_SEND_MESSAGE_ORDER = LEGACY_TOOL_ORDER["send_message"]          # == 16
+LEGACY_READ_INBOX_ORDER = LEGACY_TOOL_ORDER["read_inbox"]              # == 17
+LEGACY_BROADCAST_ORDER = LEGACY_TOOL_ORDER["broadcast"]                # == 18
+LEGACY_SHUTDOWN_REQUEST_ORDER = LEGACY_TOOL_ORDER["shutdown_request"]  # == 19
+LEGACY_PLAN_APPROVAL_ORDER = LEGACY_TOOL_ORDER["plan_approval"]        # == 20
 
 
 _TOOL_DEFS = [
@@ -422,7 +432,7 @@ for _name, _desc, _schema, _handler, _perm in _TOOL_DEFS:
         input_schema=_schema,
         handler=_handler,
         permission=_perm,
-        order=LEGACY_25_TOOL_NAMES.index(_name),
+        order=LEGACY_TOOL_ORDER[_name],
     )
 
 
