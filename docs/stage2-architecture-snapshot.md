@@ -164,3 +164,69 @@ OpenAI-compatible       ->  OpenAICompatibleAdapter
 工具系统、Extension、Output Policy、Artifact、Sandbox、Profile 均已有
 清晰边界与契约测试护栏，Provider 改造只需处理模型调用这一条纵向链路，
 不再与工具架构纠缠。
+
+## 10. Phase 3 Provider 抽象 —— 进度与验证记录
+
+### 阶段状态
+
+```text
+3A-0 Provider 契约盘点 + golden ✅
+3A-1 AnthropicAdapter + 5 调用点迁移 ✅
+3B-0 OpenAI wire 契约 ✅
+3B-1 OpenAICompatibleAdapter ✅
+3B-2 DeepSeek 真机 ✅
+3B-3 OpenRouter 真机 ✅
+3B 封板 ✅
+3C-0 ModelSpec / ModelCapabilities / ModelRegistry ✅
+3C-1 ProviderRouter ⏸（下一步）
+3D /model 会话内切换 ⏸
+```
+
+### 真机验证记录（OpenAICompatibleAdapter 零修改）
+
+**3B-2 DeepSeek**（model=deepseek-chat, base=https://api.deepseek.com）：
+- plain chat: `'OK'`，stop=end，usage(9, 1)
+- tool call: `get_weather {city: Beijing}`，stop=tool_call
+- continuation: `'Beijing 22°C sunny'`，usage(349, 13)，**cache_read=256**（来自 prompt_tokens_details.cached_tokens）
+
+**3B-3 OpenRouter**（model=qwen/qwen-2.5-72b-instruct, base=https://openrouter.ai/api/v1，非 OpenAI 原生模型，验证 Adapter 通用性）：
+- plain chat: `'OK'`，stop=end，usage(13, 1)
+- tool call: `get_weather {city: Beijing}`，stop=tool_call
+- continuation: `'Beijing 22°C sunny'`，stop=end，usage(387, 13)
+
+同一 OpenAICompatibleAdapter 连接两个不同 Provider 端点，三段全链路通过，
+无任何 `if provider` 特判 → 证明抽象是通用 Adapter 而非 DeepSeekAdapter。
+
+### Provider 抽象边界（3C 核心建模）
+
+```text
+Model    -> ModelSpec.model_id（发给 provider 的字符串）
+Provider -> ModelSpec.provider（anthropic / deepseek / openrouter）
+Adapter  -> 协议类型（AnthropicAdapter / OpenAICompatibleAdapter）
+```
+
+provider 绝不退化为 "openai-compatible"（服务商 ≠ 协议）。ModelSpec 不含
+base_url/api_key/client（归属 3C-1 Provider binding）。
+
+### 登记技术债
+
+| # | 技术债 | 处理阶段 |
+|---|--------|----------|
+| 5 | OpenAICompatibleAdapter 用标准库 urllib 传输层（无外部依赖，3B 阶段正确）；streaming/connection pooling/retry/HTTP2/async 引入时再换 | streaming/async transport |
+
+### 3C-1 ProviderRouter（计划）
+
+```text
+ModelSpec.provider
+        ↓
+ProviderRouter
+        ↓
+Provider binding
+        ↓
+Adapter
+  anthropic  -> AnthropicAdapter
+  deepseek   -> OpenAICompatibleAdapter
+  openrouter -> OpenAICompatibleAdapter
+```
+
+binding 持有 endpoint 配置（base_url / api_key_env），ModelSpec 不持有。
