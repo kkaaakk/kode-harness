@@ -17,6 +17,23 @@ import threading
 import uuid
 from pathlib import Path
 from queue import Queue
+from inspect import signature
+
+
+def _accepts_kwarg(func, name: str) -> bool:
+    """True if *func* accepts the keyword argument *name* (either as an
+    explicit parameter or via **kwargs). Used by the 3C-3B handler
+    wrappers to stay compatible with legacy mocks that predate the
+    ``model_runtime`` parameter."""
+    try:
+        params = signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in params:
+        return True
+    return any(
+        p.kind == p.VAR_KEYWORD for p in params.values()
+    )
 
 # ---------------------------------------------------------------------------
 # Re-export config so that ``from agents.harness_core import WORKDIR`` works.
@@ -49,6 +66,7 @@ from agents.providers import (
     MissingCredentialError,
     ModelRegistry,
     ModelRequest,
+    ModelRuntimeContext,
     ModelSpec,
     ProviderRouter,
     StopReason,
@@ -1342,8 +1360,57 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
         raise RuntimeError(
             f"Provider {_binding.provider!r} has no adapter_factory configured"
         )
-    _adapter = _binding.adapter_factory(_model_spec.model_id)
+    # Phase 3C-3B: the frozen per-run model snapshot. Main Agent builds
+    # its own adapter; child runtimes (subagent/team member) receive THIS
+    # context and call create_adapter() themselves — model selection is
+    # inherited, adapter instances are never shared.
+    _model_runtime = ModelRuntimeContext(
+        model_spec=_model_spec,
+        provider_binding=_binding,
+    )
+    _adapter = _model_runtime.create_adapter()
     _model_id = _model_spec.model_id  # THE single source of truth
+
+    # Phase 3C-3B: per-call child-runtime handler wiring. The Extension
+    # objects stay STATELESS; we wrap ONLY the subagent + team-member
+    # handlers with a per-call closure that injects this run's frozen
+    # ModelRuntimeContext. Child runtimes inherit the model SELECTION and
+    # create their own adapter instances (never the Parent's).
+    #
+    # NOTE: the wrappers resolve ``run_subagent``/``TEAM`` through the
+    # module globals at call time (not a closed-over binding) so tests
+    # that monkeypatch ``module.run_subagent`` / ``module.TEAM`` keep
+    # working unchanged. They also detect whether the target accepts the
+    # ``model_runtime`` kwarg and only pass it when supported (legacy
+    # mocks with the old 2-arg signature keep working).
+    if "task" in active_handlers:
+        _subagent_fn = globals()["run_subagent"]
+        _subagent_accepts_runtime = _accepts_kwarg(_subagent_fn, "model_runtime")
+        active_handlers["task"] = (
+            (lambda **kw: _subagent_fn(
+                kw.get("prompt", ""),
+                kw.get("agent_type", "Explore"),
+                model_runtime=_model_runtime,
+            ))
+            if _subagent_accepts_runtime
+            else (lambda **kw: _subagent_fn(
+                kw.get("prompt", ""),
+                kw.get("agent_type", "Explore"),
+            ))
+        )
+    if "spawn_teammate" in active_handlers:
+        _team_fn = globals()["TEAM"]
+        _spawn_accepts_runtime = _accepts_kwarg(_team_fn.spawn, "model_runtime")
+        active_handlers["spawn_teammate"] = (
+            (lambda **kw: _team_fn.spawn(
+                kw["name"], kw["role"], kw["prompt"],
+                model_runtime=_model_runtime,
+            ))
+            if _spawn_accepts_runtime
+            else (lambda **kw: _team_fn.spawn(
+                kw["name"], kw["role"], kw["prompt"],
+            ))
+        )
 
     # HOOK 1/8: BEFORE_AGENT_START
     EXTENSIONS.emit(Event.BEFORE_AGENT_START, {

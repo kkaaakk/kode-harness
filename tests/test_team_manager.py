@@ -466,7 +466,11 @@ class TestTeammateManagerThreadLifecycle:
             tm_mgr.spawn("alice", "coder", "Quick job.")
             # Wait a bit for thread to start
             time.sleep(0.2)
-            mock_loop.assert_called_once_with("alice", "coder", "Quick job.")
+            # Phase 3C-3B: spawn passes the (optional) model_runtime as
+            # the 4th arg; None here means "legacy fixed global model".
+            mock_loop.assert_called_once_with(
+                "alice", "coder", "Quick job.", None
+            )
 
     def test_shutdown_via_message_in_loop(self, env):
         """When a shutdown_request is in the inbox, _loop should exit."""

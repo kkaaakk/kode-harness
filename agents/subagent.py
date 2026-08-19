@@ -12,15 +12,16 @@ from agents.config import client, MODEL
 from agents.base_tools import run_bash, run_read, run_write, run_edit
 from agents.providers import AnthropicAdapter, ModelRequest, StopReason
 
-# Phase 3A-1: the ONLY model-call path for the subagent loop. Resolves
-# ``client`` lazily from this module's globals so tests that swap
-# run_subagent.__globals__["client"] keep working unchanged. D0/D1
-# runtime boundary untouched: own 30-round loop, own hardcoded tool set,
-# max_tokens=8000, does NOT call agent_loop.
+# Phase 3A-1: legacy default adapter used when no ModelRuntimeContext is
+# passed (keeps direct/standalone callers and fake-client tests working).
+# Phase 3C-3B: when the Parent passes ``model_runtime``, the subagent
+# creates its OWN adapter via ctx.create_adapter() - the model selection
+# is inherited, the adapter instance is NOT shared.
 _SUBAGENT_ADAPTER = AnthropicAdapter(client_provider=lambda: client)
 
 
-def run_subagent(prompt: str, agent_type: str = "Explore") -> str:
+def run_subagent(prompt: str, agent_type: str = "Explore",
+                 model_runtime=None) -> str:
     sub_tools = [
         {
             "name": "bash",
@@ -77,9 +78,15 @@ def run_subagent(prompt: str, agent_type: str = "Explore") -> str:
     }
     sub_msgs = [{"role": "user", "content": prompt}]
     resp = None
+    # Phase 3C-3B: inherit Parent model SELECTION, own adapter instance.
+    adapter = (
+        model_runtime.create_adapter()
+        if model_runtime is not None
+        else _SUBAGENT_ADAPTER
+    )
     for _ in range(30):
-        resp = _SUBAGENT_ADAPTER.complete(ModelRequest(
-            model=MODEL,
+        resp = adapter.complete(ModelRequest(
+            model=MODEL if model_runtime is None else model_runtime.model_id,
             messages=sub_msgs,
             tools=sub_tools,
             max_tokens=8000,

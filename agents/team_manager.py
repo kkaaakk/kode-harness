@@ -142,7 +142,8 @@ class TeammateManager:
                 return m
         return None
 
-    def spawn(self, name: str, role: str, prompt: str) -> str:
+    def spawn(self, name: str, role: str, prompt: str,
+              model_runtime=None) -> str:
         member = self._find(name)
         if member:
             if member["status"] not in ("idle", "shutdown"):
@@ -153,8 +154,15 @@ class TeammateManager:
             member = {"name": name, "role": role, "status": "working"}
             self.config["members"].append(member)
         self._save()
+        # Phase 3C-3B: inherit the Parent model SELECTION (the frozen
+        # ModelRuntimeContext) but NOT the Parent adapter. The context is
+        # passed explicitly across the thread boundary; the member thread
+        # creates its OWN adapter via ctx.create_adapter(). ContextVar /
+        # SecureBashContext are NOT inherited across threads (unchanged).
         threading.Thread(
-            target=self._loop, args=(name, role, prompt), daemon=True
+            target=self._loop,
+            args=(name, role, prompt, model_runtime),
+            daemon=True,
         ).start()
         return f"Spawned '{name}' (role: {role})"
 
@@ -164,7 +172,7 @@ class TeammateManager:
             member["status"] = status
             self._save()
 
-    def _loop(self, name: str, role: str, prompt: str):
+    def _loop(self, name: str, role: str, prompt: str, model_runtime=None):
         team_name = self.config["team_name"]
         sys_prompt = (
             f"You are '{name}', role: {role}, team: {team_name}, at {WORKDIR}. "
@@ -251,9 +259,18 @@ class TeammateManager:
                         self._set_status(name, "shutdown")
                         return
                     messages.append({"role": "user", "content": json.dumps(msg)})
+                # Phase 3C-3B: per-_loop adapter. model_runtime is a frozen
+                # context passed explicitly across the thread boundary; the
+                # member creates its OWN adapter (never the Parent's).
+                adapter = (
+                    model_runtime.create_adapter()
+                    if model_runtime is not None
+                    else _TEAM_ADAPTER
+                )
                 try:
-                    response = _TEAM_ADAPTER.complete(ModelRequest(
-                        model=MODEL,
+                    response = adapter.complete(ModelRequest(
+                        model=MODEL if model_runtime is None
+                        else model_runtime.model_id,
                         system=sys_prompt,
                         messages=messages,
                         tools=tools,
