@@ -44,7 +44,9 @@ if hasattr(sys.stdout, "reconfigure"):
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(override=False)
+    # Load the repo's .env explicitly (not cwd-dependent), WITHOUT
+    # overriding vars already exported in the process environment.
+    load_dotenv(REPO_ROOT / ".env", override=False)
 except ImportError:
     pass
 
