@@ -8,6 +8,10 @@ registry and /model switching come in 3C/3D.
 from agents.providers.anthropic_adapter import AnthropicAdapter
 from agents.providers.base import ProviderAdapter
 from agents.providers.message_codec import render_openai, to_canonical
+from agents.providers.model_runtime import (
+    ModelRuntimeContext,
+    resolve_model_runtime,
+)
 from agents.providers.model_spec import (
     DuplicateModelError,
     ModelCapabilities,
@@ -53,6 +57,8 @@ __all__ = [
     "DuplicateModelError",
     "UnknownModelError",
     "default_model_registry",
+    "ModelRuntimeContext",
+    "resolve_model_runtime",
     "ProviderBinding",
     "ProviderRouter",
     "DuplicateProviderError",
