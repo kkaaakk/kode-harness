@@ -21,6 +21,15 @@ from agents.providers.openai_compatible_adapter import (
     OpenAICompatibleConfig,
     OpenAICompatibleHTTPError,
 )
+from agents.providers.provider_router import (
+    DuplicateProviderError,
+    MissingCredentialError,
+    ProviderBinding,
+    ProviderRouter,
+    UnknownProviderError,
+    default_provider_router,
+    make_openai_compatible_factory,
+)
 from agents.providers.types import (
     AssistantMessage,
     ModelRequest,
@@ -44,6 +53,13 @@ __all__ = [
     "DuplicateModelError",
     "UnknownModelError",
     "default_model_registry",
+    "ProviderBinding",
+    "ProviderRouter",
+    "DuplicateProviderError",
+    "UnknownProviderError",
+    "MissingCredentialError",
+    "default_provider_router",
+    "make_openai_compatible_factory",
     "ModelRequest",
     "ModelResponse",
     "StopReason",
