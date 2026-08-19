@@ -144,19 +144,19 @@ def make_openai_compatible_factory(
     return factory
 
 
-def _make_anthropic_adapter(model_id: str) -> AnthropicAdapter:
-    """Anthropic adapter: resolves the module-level client lazily via
-    client_provider (matches how the call sites already wire it)."""
-    from agents.config import client
-
-    return AnthropicAdapter(client_provider=lambda: client)
+def _make_anthropic_adapter(client_provider, model_id: str) -> AnthropicAdapter:
+    """Anthropic adapter bound to the given client_provider (resolved
+    lazily per call). Tests inject fakes via client_provider."""
+    return AnthropicAdapter(client_provider=client_provider)
 
 
 # ---------------------------------------------------------------------------
 # Default router (3C-1 canonical starting point)
 # ---------------------------------------------------------------------------
 
-def default_provider_router() -> ProviderRouter:
+def default_provider_router(
+    anthropic_client_provider: Callable[[], Any] | None = None,
+) -> ProviderRouter:
     """The canonical starting router:
 
         anthropic  -> AnthropicAdapter
@@ -165,12 +165,31 @@ def default_provider_router() -> ProviderRouter:
 
     ``model_id`` is NOT stored here - it comes from ModelSpec at call
     time via create_adapter(model_id). Credentials resolved lazily.
+
+    ``anthropic_client_provider``: optional zero-arg callable returning
+    the Anthropic client to use. If None, the anthropic binding resolves
+    the client from ``agents.config`` lazily (the historic behavior).
+    Harness callers should pass their own module-level client so fake-
+    client tests keep working unchanged.
     """
+    if anthropic_client_provider is None:
+        # Historic default: resolve from agents.config at adapter-creation
+        # time. NOTE: only safe when agents.config is importable under the
+        # current anthropic module - harness callers should inject their
+        # own client_provider to stay testable.
+        def _lazy_config_client() -> Any:
+            from agents.config import client  # noqa: PLC0415
+            return client
+
+        anthropic_client_provider = _lazy_config_client
+
     router = ProviderRouter()
     router.register(ProviderBinding(
         provider="anthropic",
         adapter_type="anthropic",
-        adapter_factory=_make_anthropic_adapter,
+        adapter_factory=lambda model_id: _make_anthropic_adapter(
+            anthropic_client_provider, model_id
+        ),
     ))
     router.register(ProviderBinding(
         provider="deepseek",

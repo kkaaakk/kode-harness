@@ -15,6 +15,7 @@ providers. Errors (HTTP, JSON, SDK) pass through unwrapped (D-3).
 from __future__ import annotations
 
 import json
+import types
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -199,12 +200,45 @@ class OpenAICompatibleAdapter:
             usage=_parse_usage(raw.get("usage")),
             model=model,
             provider=self.provider,
-            raw_response=raw,
+            raw_response=_wire_response(raw, text, tool_calls),
             provider_metadata={
                 "raw_finish_reason": finish,
                 "raw_message": message,
             },
         )
+
+
+class _Block:
+    """Attribute-style content block (matches the Anthropic SDK's block
+    surface that the Agent Loop reads for history writeback)."""
+
+    __slots__ = ("type", "text", "name", "id", "input")
+
+    def __init__(self, *, type_, text=None, name=None, id_=None, input_=None):
+        self.type = type_
+        self.text = text
+        self.name = name
+        self.id = id_
+        self.input = input_
+
+
+def _wire_response(raw: dict, text: str, tool_calls: list[ToolCall]):
+    """Wrap the raw OpenAI response dict with a ``content`` list of
+    Anthropic-style blocks, so the Agent Loop's verbatim history writeback
+    (``response.raw_response.content``) works uniformly across adapters.
+
+    The wrapped object retains the original dict fields (access via
+    attribute on the original keys) and exposes ``.content``.
+    """
+    blocks = []
+    if text:
+        blocks.append(_Block(type_="text", text=text))
+    for tc in tool_calls:
+        blocks.append(_Block(type_="tool_use", name=tc.name,
+                             id_=tc.id, input_=tc.arguments))
+    namespace = types.SimpleNamespace(content=blocks)
+    namespace.__dict__.update(raw)
+    return namespace
 
 
 def _parse_usage(raw_usage: dict | None) -> TokenUsage | None:

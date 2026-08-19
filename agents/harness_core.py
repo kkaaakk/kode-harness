@@ -44,10 +44,24 @@ from agents.base_tools import (
     set_secure_bash_context,
     reset_secure_bash_context,
 )
-from agents.providers import AnthropicAdapter, ModelRequest, StopReason
-# Phase 3A-1: the ONLY model-call path for the Agent Loop. Resolves
-# ``client`` lazily from this module's globals so tests that patch
-# module.client.messages.create keep working unchanged.
+from agents.providers import (
+    AnthropicAdapter,
+    MissingCredentialError,
+    ModelRegistry,
+    ModelRequest,
+    ModelSpec,
+    ProviderRouter,
+    StopReason,
+    UnknownModelError,
+    UnknownProviderError,
+    default_model_registry,
+    default_provider_router,
+)
+# Phase 3A-1: legacy default adapter, still used as the historical
+# fallback and by non-Router call sites. The main agent_loop resolves its
+# adapter via ModelRegistry -> ProviderRouter (3C-2) and does NOT use
+# this global. Resolves ``client`` lazily from module globals so tests
+# that patch module.client.messages.create keep working unchanged.
 ANTHROPIC_ADAPTER = AnthropicAdapter(client_provider=lambda: client)
 from agents.todo_manager import TodoManager
 from agents.skill_loader import SkillLoader
@@ -1078,7 +1092,10 @@ def _validate_secure_sandbox(
 
 def agent_loop(messages: list, event_callback=None, tool_profile: str | None = None,
                session_id: str | None = None, *, artifact_store=None,
-               tool_contributors=None):
+               tool_contributors=None,
+               model_alias: str | None = None,
+               model_registry: ModelRegistry | None = None,
+               provider_router: ProviderRouter | None = None):
     """Run the agent loop.
 
     Parameters
@@ -1285,6 +1302,49 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
             sandbox=SANDBOX,
         )
 
+    # Phase 3C-2: resolve the model once at agent_loop() startup
+    # (snapshot semantics, exactly like active_tools).
+    #
+    #   model_alias=None       -> default alias "claude" (historic Anthropic)
+    #   model_registry=None    -> default_model_registry()
+    #   provider_router=None   -> default_provider_router()
+    #
+    # Resolution chain:
+    #   ModelRegistry.get(alias) -> ModelSpec(provider, model_id)
+    #   -> ProviderRouter.get(provider) -> ProviderBinding
+    #   -> binding.adapter_factory(model_id) -> Adapter (created ONCE per
+    #      agent_loop call, reused for every turn).
+    #
+    # The adapter and model_id are per-call LOCAL variables — never module
+    # globals, so concurrent agent_loop() calls with different aliases do
+    # not interfere. Unknown alias / unknown provider / missing credential
+    # all fail fast BEFORE any model request, with no fallback.
+    if model_registry is None:
+        model_registry = default_model_registry()
+    if provider_router is None:
+        provider_router = default_provider_router(
+            anthropic_client_provider=lambda: client
+        )
+    _model_alias = model_alias or "claude"
+    _model_spec = model_registry.get(_model_alias)  # UnknownModelError
+    if model_alias is None:
+        # Historic default: provider=anthropic but the model id remains
+        # the legacy MODULE-level MODEL (from MODEL_ID env), so default
+        # behavior is byte-for-byte identical to pre-3C-2.
+        _model_spec = ModelSpec(
+            alias=_model_spec.alias,
+            provider=_model_spec.provider,
+            model_id=MODEL,
+            capabilities=_model_spec.capabilities,
+        )
+    _binding = provider_router.get(_model_spec.provider)  # UnknownProviderError
+    if _binding.adapter_factory is None:
+        raise RuntimeError(
+            f"Provider {_binding.provider!r} has no adapter_factory configured"
+        )
+    _adapter = _binding.adapter_factory(_model_spec.model_id)
+    _model_id = _model_spec.model_id  # THE single source of truth
+
     # HOOK 1/8: BEFORE_AGENT_START
     EXTENSIONS.emit(Event.BEFORE_AGENT_START, {
         "event": Event.BEFORE_AGENT_START,
@@ -1329,7 +1389,7 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
 
             # HOOK 2/8: BEFORE_MODEL_REQUEST
             model_request_kwargs = {
-                "model": MODEL,
+                "model": _model_id,
                 "system": SYSTEM,
                 "messages": messages,
                 "tools": active_tools,
@@ -1337,7 +1397,7 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
             }
             pre_model_outcome = EXTENSIONS.emit(Event.BEFORE_MODEL_REQUEST, {
                 "event": Event.BEFORE_MODEL_REQUEST,
-                "model": MODEL,
+                "model": _model_id,
                 "system_prompt": SYSTEM,
                 "tools": active_tools,
                 "messages": messages,
@@ -1346,16 +1406,27 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
             # Apply patches (no-op when registry empty)
             if pre_model_outcome.model_request_patch:
                 model_request_kwargs.update(pre_model_outcome.model_request_patch)
+            # Consistency guard (3C-2): ModelSpec.model_id is the single
+            # source of truth for the model. An extension may patch request
+            # content (max_tokens/system/messages) but must NOT silently
+            # change the already-resolved model identity — that would
+            # desync the Provider (from Router) from the model id sent.
+            if model_request_kwargs.get("model") != _model_id:
+                raise ValueError(
+                    f"BEFORE_MODEL_REQUEST attempted to change model from "
+                    f"{_model_id!r} to {model_request_kwargs.get('model')!r}; "
+                    f"ModelSpec.model_id is the single source of truth"
+                )
             if pre_model_outcome.blocked:
                 # An extension blocked the model call. End the loop.
                 agent_status = "blocked"
                 agent_error = pre_model_outcome.block_reason
                 return
 
-            # LLM call (Phase 3A-1: via AnthropicAdapter; errors pass
-            # through unwrapped, D-3).
-            response = ANTHROPIC_ADAPTER.complete(ModelRequest(
-                model=model_request_kwargs.get("model", MODEL),
+            # LLM call (Phase 3C-2: via the per-call resolved adapter;
+            # errors pass through unwrapped, D-3).
+            response = _adapter.complete(ModelRequest(
+                model=_model_id,
                 messages=model_request_kwargs.get("messages", messages),
                 tools=model_request_kwargs.get("tools"),
                 system=model_request_kwargs.get("system"),
