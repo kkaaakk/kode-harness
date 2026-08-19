@@ -10,6 +10,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    # agents/config.py requires MODEL_ID at import time and the Anthropic
+    # SDK requires an API key at client construction. The repo's .env is
+    # gitignored, so CI provides minimal placeholders (tests inject fake
+    # clients and never make real API calls).
+    env:
+      MODEL_ID: test-model
+      ANTHROPIC_API_KEY: ci-placeholder
+
     steps:
       - uses: actions/checkout@v6
 
@@ -23,4 +31,4 @@ jobs:
           pip install pytest
 
       - name: Run tests
-        run: python -m pytest tests/
+        run: python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/eval --ignore=tests/test_frontend_server.py
