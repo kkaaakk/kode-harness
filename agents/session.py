@@ -85,3 +85,92 @@ def resolve_session_model_alias(
     if session is not None and session.model_alias is not None:
         return session.model_alias
     return DEFAULT_MODEL_ALIAS
+
+
+def describe_model_alias(
+    session: SessionState | None,
+    registry: ModelRegistry | None = None,
+) -> str:
+    """Human-readable description of the current effective model.
+
+    Distinguishes the raw session selection (None vs an alias) from the
+    effective alias actually used by the next run, so a default-model
+    session reads as 'claude / source=default', not 'None'."""
+    from agents.providers.model_spec import default_model_registry
+
+    reg = registry or default_model_registry()
+    session_alias = get_session_model_alias(session)
+    effective = resolve_session_model_alias(session, None)
+    spec = reg.get(effective)
+    source = "session" if session_alias is not None else "default"
+    return (
+        f"Current model: {effective}\n"
+        f"Provider: {spec.provider}\n"
+        f"Model ID: {spec.model_id}\n"
+        f"Source: {source}"
+    )
+
+
+def list_model_aliases(
+    session: SessionState | None,
+    registry: ModelRegistry | None = None,
+) -> str:
+    """List all registered models, marking the current effective alias.
+
+    The list is ALWAYS derived from ModelRegistry.list() (registration
+    order), never hardcoded."""
+    from agents.providers.model_spec import default_model_registry
+
+    reg = registry or default_model_registry()
+    current = resolve_session_model_alias(session, None)
+    lines = []
+    for spec in reg.list():
+        marker = "*" if spec.alias == current else " "
+        lines.append(f"{marker} {spec.alias}")
+        lines.append(f"    provider: {spec.provider}")
+        lines.append(f"    model: {spec.model_id}")
+    return "\n".join(lines)
+
+
+def handle_model_command(
+    command: str,
+    session: SessionState,
+    registry: ModelRegistry | None = None,
+) -> str:
+    """Handle a ``/model ...`` command (Phase 3D-1).
+
+    Supported forms:
+        /model             -> current (same as /model current)
+        /model current     -> current effective model
+        /model list        -> ModelRegistry.list() with current marker
+        /model <alias>     -> validate alias, set session.model_alias,
+                              "applies to the next agent run"
+
+    Boundaries:
+      - reads ModelRegistry, writes SessionState only
+      - does NOT read API keys / build adapters (selection != credential)
+      - does NOT touch the running ModelRuntimeContext
+      - does NOT fire MODEL_CHANGED (that is 3D-2)
+      - unknown alias -> UnknownModelError, session value unchanged
+    """
+    from agents.providers.model_spec import default_model_registry
+
+    reg = registry or default_model_registry()
+    parts = command.strip().split()
+    # /model -> current
+    if len(parts) == 1:
+        return describe_model_alias(session, reg)
+    sub = parts[1]
+    if sub == "current":
+        return describe_model_alias(session, reg)
+    if sub == "list":
+        return list_model_aliases(session, reg)
+    # /model <alias>
+    set_session_model_alias(session, sub, reg)  # raises UnknownModelError
+    spec = reg.get(sub)
+    return (
+        f"Model selected: {sub}\n"
+        f"Provider: {spec.provider}\n"
+        f"Model ID: {spec.model_id}\n"
+        f"Applies to the next agent run."
+    )

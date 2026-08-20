@@ -63,6 +63,12 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 sessions: dict[str, list[dict[str, Any]]] = {}
 
+# Phase 3D-1: per-session model selection (alias for the next agent run).
+from agents.session import SessionState, handle_model_command  # noqa: E402
+from agents.providers.model_spec import UnknownModelError  # noqa: E402
+
+session_states: dict[str, SessionState] = {}
+
 
 class ChatRequest(BaseModel):
     message: str
@@ -170,8 +176,11 @@ async def chat(req: ChatRequest):
     sid = req.session_id or str(uuid.uuid4())[:8]
     if sid not in sessions:
         sessions[sid] = []
+    if sid not in session_states:
+        session_states[sid] = SessionState(session_id=sid)
 
     messages = sessions[sid]
+    session = session_states[sid]
 
     # --- handle slash commands ---
     raw = req.message.strip()
@@ -194,6 +203,12 @@ async def chat(req: ChatRequest):
             reply=json.dumps(inbox, indent=2) if inbox else "Inbox is empty.",
             tool_calls=[],
         )
+    if raw.startswith("/model"):
+        try:
+            reply = handle_model_command(raw, session)
+        except UnknownModelError as exc:
+            reply = f"Unknown model: {exc.args[0] if exc.args else ''}"
+        return ChatResponse(session_id=sid, reply=reply, tool_calls=[])
 
     # --- append user message ---
     messages.append({"role": "user", "content": req.message})
@@ -203,7 +218,7 @@ async def chat(req: ChatRequest):
 
     try:
         with redirect_stdout(captured):
-            agent_loop(messages)
+            agent_loop(messages, session=session)
     except Exception as exc:
         if messages and messages[-1].get("role") == "user":
             messages.pop()
@@ -247,16 +262,24 @@ async def chat_stream(req: ChatRequest):
     sid = req.session_id or str(uuid.uuid4())[:8]
     if sid not in sessions:
         sessions[sid] = []
+    if sid not in session_states:
+        session_states[sid] = SessionState(session_id=sid)
     messages = sessions[sid]
+    session = session_states[sid]
 
     # Handle slash commands synchronously
     raw = req.message.strip()
-    if raw in ("/tasks", "/team", "/inbox"):
+    if raw in ("/tasks", "/team", "/inbox", "/model") or raw.startswith("/model"):
         async def cmd_stream():
             if raw == "/tasks":
                 reply = TASK_MGR.list_all()
             elif raw == "/team":
                 reply = TEAM.list_all()
+            elif raw.startswith("/model"):
+                try:
+                    reply = handle_model_command(raw, session)
+                except UnknownModelError as exc:
+                    reply = f"Unknown model: {exc.args[0] if exc.args else ''}"
             else:
                 inbox_data = BUS.read_inbox("lead")
                 reply = json.dumps(inbox_data, indent=2) if inbox_data else "Inbox is empty."
@@ -272,7 +295,7 @@ async def chat_stream(req: ChatRequest):
         try:
             def cb(event):
                 q.put_nowait(event)
-            agent_loop(messages, event_callback=cb)
+            agent_loop(messages, event_callback=cb, session=session)
             q.put_nowait({"type": "done"})
         except Exception as exc:
             # Remove the user message on failure

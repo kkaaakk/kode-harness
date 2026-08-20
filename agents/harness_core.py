@@ -87,6 +87,7 @@ from agents.providers import (
 from agents.session import (
     DEFAULT_MODEL_ALIAS,
     SessionState,
+    handle_model_command,
     resolve_session_model_alias,
 )
 # Phase 3A-1: legacy default adapter, still used as the historical
@@ -1758,6 +1759,10 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
 # === SECTION: repl ============================================================
 if __name__ == "__main__":
     history = []
+    # Phase 3D-1: a per-REPL session holds the model selection for the
+    # next agent run. /model mutates this; agent_loop(session=...) reads
+    # it once at startup.
+    _repl_session = SessionState()
     while True:
         try:
             query = input("\033[36mharness >> \033[0m")
@@ -1779,8 +1784,14 @@ if __name__ == "__main__":
         if query.strip() == "/inbox":
             print(json.dumps(BUS.read_inbox("lead"), indent=2))
             continue
+        if query.strip().startswith("/model"):
+            try:
+                print(handle_model_command(query.strip(), _repl_session))
+            except UnknownModelError as exc:
+                print(f"Unknown model: {exc.args[0] if exc.args else ''}")
+            continue
         history.append({"role": "user", "content": query})
-        agent_loop(history)
+        agent_loop(history, session=_repl_session)
         response_content = history[-1]["content"]
         if isinstance(response_content, list):
             for block in response_content:
