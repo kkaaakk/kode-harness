@@ -14,9 +14,17 @@ jobs:
     # SDK requires an API key at client construction. The repo's .env is
     # gitignored, so CI provides minimal placeholders (tests inject fake
     # clients and never make real API calls).
+    #
+    # AGENT_SANDBOX_BACKEND=none: create_sandbox() defaults to DockerSandbox
+    # when Docker is available, but most unit tests call bash with
+    # sys.executable (a HOST path that does not exist inside a container).
+    # Forcing NoOpSandbox keeps the CI test baseline identical to local
+    # (non-Docker) runs. Docker-specific tests construct DockerSandbox
+    # explicitly and still exercise the real daemon.
     env:
       MODEL_ID: test-model
       ANTHROPIC_API_KEY: ci-placeholder
+      AGENT_SANDBOX_BACKEND: none
 
     steps:
       - uses: actions/checkout@v6

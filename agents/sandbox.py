@@ -653,15 +653,20 @@ class DockerSandbox(SandboxBackend):
         return [(self._workdir, self._container_workdir)]
 
     def _host_path_to_container(self, host_path: str) -> str:
-        """Translate an absolute host path to its container equivalent."""
-        if os.name != "nt":
-            return host_path
-        # On Windows: C:\Users\...\project\src\main.py → /workspace/src/main.py
+        """Translate an absolute host path to its container equivalent.
+
+        Workdir-inside paths map under /workspace; paths OUTSIDE the
+        workdir map to /workspace root (best-effort containment, never
+        expose host paths into the container).
+        """
         host_abs = os.path.abspath(host_path)
-        if host_abs.startswith(self._workdir):
-            relative = host_abs[len(self._workdir):].lstrip("\\").replace("\\", "/")
-            return f"/workspace/{relative}" if relative else "/workspace"
-        # Outside workdir — best-effort, map to /workspace root
+        workdir_abs = os.path.abspath(self._workdir)
+        if host_abs == workdir_abs:
+            return "/workspace"
+        if host_abs.startswith(workdir_abs + os.sep):
+            relative = host_abs[len(workdir_abs):].lstrip(os.sep).replace("\\", "/")
+            return f"/workspace/{relative}"
+        # Outside workdir -> best-effort, map to /workspace root
         return "/workspace"
 
 
