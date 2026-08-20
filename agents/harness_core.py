@@ -1786,7 +1786,8 @@ if __name__ == "__main__":
             continue
         if query.strip().startswith("/model"):
             try:
-                print(handle_model_command(query.strip(), _repl_session))
+                print(handle_model_command(
+                    query.strip(), _repl_session, extensions=EXTENSIONS))
             except UnknownModelError as exc:
                 print(f"Unknown model: {exc.args[0] if exc.args else ''}")
             continue

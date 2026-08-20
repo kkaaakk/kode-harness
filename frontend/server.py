@@ -44,6 +44,7 @@ from agents.harness_core import (  # noqa: E402
     TEAM,
     BUS,
     TODO,
+    EXTENSIONS,
 )
 
 # ---------------------------------------------------------------------------
@@ -205,7 +206,7 @@ async def chat(req: ChatRequest):
         )
     if raw.startswith("/model"):
         try:
-            reply = handle_model_command(raw, session)
+            reply = handle_model_command(raw, session, extensions=EXTENSIONS)
         except UnknownModelError as exc:
             reply = f"Unknown model: {exc.args[0] if exc.args else ''}"
         return ChatResponse(session_id=sid, reply=reply, tool_calls=[])
@@ -277,7 +278,8 @@ async def chat_stream(req: ChatRequest):
                 reply = TEAM.list_all()
             elif raw.startswith("/model"):
                 try:
-                    reply = handle_model_command(raw, session)
+                    reply = handle_model_command(
+                        raw, session, extensions=EXTENSIONS)
                 except UnknownModelError as exc:
                     reply = f"Unknown model: {exc.args[0] if exc.args else ''}"
             else:

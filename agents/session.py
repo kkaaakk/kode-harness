@@ -25,12 +25,40 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from agents.providers.model_spec import ModelRegistry, UnknownModelError
+from agents.providers.model_spec import ModelRegistry, ModelSpec, UnknownModelError
 
 # The system default model alias (Session selection's fallback entry
 # point). Kept distinct from legacy config.MODEL (the actual Anthropic
 # model id used by the historic default path).
 DEFAULT_MODEL_ALIAS = "claude"
+
+
+@dataclass(frozen=True)
+class ModelChangedPayload:
+    """Phase 3D-2 after-change notification payload.
+
+    Describes the change to the model selection for the SESSION's NEXT
+    agent run. It NEVER describes a change to a running
+    ModelRuntimeContext (the current run is untouched).
+
+    Two layers are kept distinct:
+      selection       = the raw session.model_alias (may be None)
+      effective_alias = the alias actually used next run (None resolves
+                        to DEFAULT_MODEL_ALIAS)
+
+    Carries ModelSpec so extensions do not re-resolve the registry
+    (snapshot/consistency). Deliberately does NOT carry ProviderBinding /
+    Adapter / API key / ModelRuntimeContext.
+    """
+
+    session_id: str | None = None
+    old_selection: str | None = None
+    new_selection: str | None = None
+    old_effective_alias: str | None = None
+    new_effective_alias: str | None = None
+    old_model_spec: ModelSpec | None = None
+    new_model_spec: ModelSpec | None = None
+    reason: str = "user_command"
 
 
 @dataclass
@@ -136,8 +164,9 @@ def handle_model_command(
     command: str,
     session: SessionState,
     registry: ModelRegistry | None = None,
+    extensions=None,
 ) -> str:
-    """Handle a ``/model ...`` command (Phase 3D-1).
+    """Handle a ``/model ...`` command (Phase 3D-1 + 3D-2).
 
     Supported forms:
         /model             -> current (same as /model current)
@@ -150,10 +179,15 @@ def handle_model_command(
       - reads ModelRegistry, writes SessionState only
       - does NOT read API keys / build adapters (selection != credential)
       - does NOT touch the running ModelRuntimeContext
-      - does NOT fire MODEL_CHANGED (that is 3D-2)
+      - after a successful set with an EFFECTIVE model change, fires
+        MODEL_CHANGED (notification only) via ``extensions`` (an
+        ExtensionRegistry-like object with emit()); a handler failure or
+        block does NOT roll back the already-committed session selection
       - unknown alias -> UnknownModelError, session value unchanged
+      - /model current / list never fire the event
     """
     from agents.providers.model_spec import default_model_registry
+    from agents.types.events import Event
 
     reg = registry or default_model_registry()
     parts = command.strip().split()
@@ -165,12 +199,34 @@ def handle_model_command(
         return describe_model_alias(session, reg)
     if sub == "list":
         return list_model_aliases(session, reg)
-    # /model <alias>
+    # /model <alias>: compute old state, commit, then notify.
+    old_selection = get_session_model_alias(session)
+    old_effective = resolve_session_model_alias(session, None)
+    old_spec = reg.get(old_effective)
     set_session_model_alias(session, sub, reg)  # raises UnknownModelError
-    spec = reg.get(sub)
+    new_selection = get_session_model_alias(session)
+    new_effective = resolve_session_model_alias(session, None)
+    new_spec = reg.get(new_effective)
+
+    # Notification ONLY when the effective model actually changes.
+    if old_effective != new_effective and extensions is not None:
+        extensions.emit(Event.MODEL_CHANGED, {
+            "event": Event.MODEL_CHANGED,
+            "payload": ModelChangedPayload(
+                session_id=session.session_id,
+                old_selection=old_selection,
+                new_selection=new_selection,
+                old_effective_alias=old_effective,
+                new_effective_alias=new_effective,
+                old_model_spec=old_spec,
+                new_model_spec=new_spec,
+                reason="user_command",
+            ),
+        })
+
     return (
         f"Model selected: {sub}\n"
-        f"Provider: {spec.provider}\n"
-        f"Model ID: {spec.model_id}\n"
+        f"Provider: {new_spec.provider}\n"
+        f"Model ID: {new_spec.model_id}\n"
         f"Applies to the next agent run."
     )

@@ -43,6 +43,8 @@ class Event(HookPoint):
     AFTER_TOOL_RESULT = "after_tool_result"
     # Compaction
     BEFORE_COMPACTION = "before_compaction"
+    # Model selection (Phase 3D-2)
+    MODEL_CHANGED = "model_changed"
 
 
 # Ordered list for documentation / iteration
@@ -55,6 +57,7 @@ ALL_HOOKS = [
     Event.TURN_END,
     Event.AGENT_END,
     Event.BEFORE_COMPACTION,
+    Event.MODEL_CHANGED,
 ]
 
 
