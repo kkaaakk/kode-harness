@@ -655,18 +655,29 @@ class DockerSandbox(SandboxBackend):
     def _host_path_to_container(self, host_path: str) -> str:
         """Translate an absolute host path to its container equivalent.
 
-        Workdir-inside paths map under /workspace; paths OUTSIDE the
-        workdir map to /workspace root (best-effort containment, never
-        expose host paths into the container).
+        On POSIX the container mounts the host workdir at the same path,
+        so workdir-inside paths keep their absolute form. Paths OUTSIDE
+        the workdir map to the container workdir root (/workspace) so no
+        host path is ever exposed into the container.
+        On Windows the container workdir is mounted at /workspace, so
+        workdir-inside paths map to /workspace/... and outside paths to
+        /workspace.
         """
         host_abs = os.path.abspath(host_path)
         workdir_abs = os.path.abspath(self._workdir)
+        inside = (host_abs == workdir_abs) or (
+            host_abs.startswith(workdir_abs + os.sep)
+        )
+        if os.name != "nt":
+            if inside:
+                return host_abs
+            return "/workspace"
+        # Windows
         if host_abs == workdir_abs:
             return "/workspace"
-        if host_abs.startswith(workdir_abs + os.sep):
+        if inside:
             relative = host_abs[len(workdir_abs):].lstrip(os.sep).replace("\\", "/")
             return f"/workspace/{relative}"
-        # Outside workdir -> best-effort, map to /workspace root
         return "/workspace"
 
 
