@@ -313,3 +313,79 @@ Snapshot 语义保持 ✅
 **Phase 3C 正式封板。** 下一步 3D `/model`：
 `/model` 修改的是 Session 下一次运行使用的 model alias，不修改当前正在运行的
 ModelRuntimeContext（与 immutable per-run snapshot 完全吻合）。
+
+## 12. Phase 3 封板（3D-final 总收口）
+
+### 3D 模型切换语义
+
+```text
+SessionState.model_alias        (mutable, 下一次 run 用)
+    ≠
+ModelRuntimeContext             (immutable, 当前 run 已冻结)
+
+优先级：显式 agent_loop(model_alias=) > session.model_alias > DEFAULT_MODEL_ALIAS("claude")
+
+/model deepseek
+  → session.model_alias = deepseek（先提交）
+  → 仅当 effective model 真变时发 1× MODEL_CHANGED（after-notification，不回滚）
+  → 当前 run 完全不动
+  → 下一次 run resolve 新 ModelRuntimeContext
+```
+
+### 跨 Provider History Continuation（3D-final 锁定）
+
+| Previous        | Next            | History continuation |
+| --------------- | --------------- | -------------------- |
+| Claude          | DeepSeek        | ✅（legacy→canonical→OpenAI wire） |
+| DeepSeek        | Claude          | ✅（OpenAI raw_response.content bridge→Anthropic） |
+| Claude          | OpenRouter/Qwen | ✅ |
+| OpenRouter/Qwen | Claude          | ✅ |
+
+关键契约（`tests/test_phase3_final_contract.py` 锁定）：
+- tool_call_id 跨 Provider 保持对应（A→A, B→B），多 tool call 顺序不丢
+- text + tool_call 混合历史保持
+- tool error 内容不丢（OpenAI wire 无 is_error 等价字段，但 content 保留）
+- `/model` 切模型不清历史（切模型 ≠ 新建会话）
+- Claude→DeepSeek→Claude 连续三 Run 共享同一 history
+- 两次有效切换恰好发 2 个 MODEL_CHANGED
+- explicit override 不修改 Session selection，override 前后共享历史
+
+### Phase 3 最终状态
+
+```text
+Adapters:
+  Anthropic            -> AnthropicAdapter ✅
+  DeepSeek             -> OpenAICompatibleAdapter ✅（真机）
+  OpenRouter/Qwen      -> OpenAICompatibleAdapter ✅（真机）
+
+Domain:
+  ModelSpec / ModelCapabilities ✅
+  ProviderRouter / ProviderBinding ✅
+  ModelRuntimeContext ✅
+
+Runtime propagation:
+  Main / Subagent / Team / Compression / TokenBudget
+  全部 -> ModelRuntimeContext ✅
+
+Session:
+  model_alias -> 下一 Run ✅
+  ModelRuntimeContext -> 当前 Run immutable snapshot ✅
+  /model + MODEL_CHANGED ✅
+  per-run snapshot ✅
+
+Cross-provider history: 双向兼容 ✅
+Tool call/result 跨 Provider 保持对应 ✅
+无 CURRENT_MODEL / 无 mutable global model runtime ✅
+Stage 2 全契约继续通过，0 新增回归 ✅
+```
+
+**Phase 3 Provider / Model Architecture ✅ SEALED**
+
+### Phase 3 遗留技术债（不在 Phase 3 清理）
+
+| # | 技术债 | 说明 |
+|---|--------|------|
+| A | `raw_response.content` Anthropic-shaped compatibility bridge | DeepSeek→Claude 依赖它工作（已锁为兼容行为）。长期目标：ModelResponse 提供 canonical AssistantMessage，业务 Runtime 不再读 raw_response。独立 Message Architecture 阶段处理 |
+| B | Legacy Anthropic fallback（`auto_compact(model_runtime=None)` / `summarize_with_anthropic`） | 新 Runtime 全 provider-aware；确认无外部依赖后删 |
+| C | 缺 ModelLimits（context_window/max_output_tokens） | capabilities（能不能）与 limits（能装多少）分离 |
+| D | urllib transport | streaming/async 时再处理 |
