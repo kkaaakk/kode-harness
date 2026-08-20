@@ -84,6 +84,11 @@ from agents.providers import (
     default_model_registry,
     default_provider_router,
 )
+from agents.session import (
+    DEFAULT_MODEL_ALIAS,
+    SessionState,
+    resolve_session_model_alias,
+)
 # Phase 3A-1: legacy default adapter, still used as the historical
 # fallback and by non-Router call sites. The main agent_loop resolves its
 # adapter via ModelRegistry -> ProviderRouter (3C-2) and does NOT use
@@ -1122,7 +1127,8 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
                tool_contributors=None,
                model_alias: str | None = None,
                model_registry: ModelRegistry | None = None,
-               provider_router: ProviderRouter | None = None):
+               provider_router: ProviderRouter | None = None,
+               session: SessionState | None = None):
     """Run the agent loop.
 
     Parameters
@@ -1352,9 +1358,14 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
         provider_router = default_provider_router(
             anthropic_client_provider=lambda: client
         )
-    _model_alias = model_alias or "claude"
+    # Phase 3D-0: resolve the effective alias ONCE at startup.
+    # Precedence: explicit agent_loop(model_alias=...) > session selection
+    # > DEFAULT_MODEL_ALIAS. The session alias is read exactly once here;
+    # changing session.model_alias DURING this run does NOT affect the
+    # frozen ModelRuntimeContext below.
+    _model_alias = resolve_session_model_alias(session, model_alias)
     _model_spec = model_registry.get(_model_alias)  # UnknownModelError
-    if model_alias is None:
+    if _model_alias == DEFAULT_MODEL_ALIAS:
         # Historic default: provider=anthropic but the model id remains
         # the legacy MODULE-level MODEL (from MODEL_ID env), so default
         # behavior is byte-for-byte identical to pre-3C-2.
