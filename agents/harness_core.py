@@ -35,6 +35,15 @@ def _accepts_kwarg(func, name: str) -> bool:
         p.kind == p.VAR_KEYWORD for p in params.values()
     )
 
+
+def _compact_messages(messages, model_runtime):
+    """Call auto_compact with model propagation, compatible with legacy
+    mocks (old 1-arg signature)."""
+    fn = globals()["auto_compact"]
+    if _accepts_kwarg(fn, "model_runtime"):
+        return fn(messages, model_runtime=model_runtime)
+    return fn(messages)
+
 # ---------------------------------------------------------------------------
 # Re-export config so that ``from agents.harness_core import WORKDIR`` works.
 # ---------------------------------------------------------------------------
@@ -1434,7 +1443,7 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
                     "event": Event.BEFORE_COMPACTION,
                     "pre_compact_messages": messages,
                 })
-                messages[:] = auto_compact(messages)
+                messages[:] = _compact_messages(messages, _model_runtime)
             # s08: drain background notifications
             notifs = BG.drain()
             if notifs:
@@ -1679,7 +1688,7 @@ def agent_loop(messages: list, event_callback=None, tool_profile: str | None = N
                     "event": Event.BEFORE_COMPACTION,
                     "pre_compact_messages": messages,
                 })
-                messages[:] = auto_compact(messages)
+                messages[:] = _compact_messages(messages, _model_runtime)
                 # Manual compress returns from loop. AGENT_END fires in finally.
                 return
     except asyncio.CancelledError:
@@ -1748,7 +1757,7 @@ if __name__ == "__main__":
         if query.strip() == "/compact":
             if history:
                 print("[manual compact via /compact]")
-                history[:] = auto_compact(history)
+                history[:] = _compact_messages(history, None)
             continue
         if query.strip() == "/tasks":
             print(TASK_MGR.list_all())

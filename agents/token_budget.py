@@ -261,17 +261,14 @@ def summarize_with_anthropic(
     history_text: str,
     summary_max_tokens: int,
 ) -> str:
-    prompt = (
-        "Update the rolling conversation summary for continuity.\n\n"
-        "Rules:\n"
-        "- Preserve important goals, decisions, open tasks, file paths, and current state.\n"
-        "- Merge the previous summary with the older history; do not restart from scratch.\n"
-        "- Protected user preferences and long-term memory are preserved separately, "
-        "so do not rewrite or override them here.\n"
-        "- Keep the result concise and useful for the next model call.\n\n"
-        f"<previous_summary>\n{previous_summary or '(none)'}\n</previous_summary>\n\n"
-        f"<older_history>\n{history_text}\n</older_history>"
-    )
+    """Legacy Anthropic-specific summarizer (Phase 3A-1).
+
+    Kept as a compatibility wrapper (Phase 3C-3C): new provider-aware
+    callers should use ``summarize_with_model`` with a ModelRuntimeContext
+    so the summary follows the Parent model selection instead of a fixed
+    Anthropic call.
+    """
+    prompt = _build_summary_prompt(previous_summary, history_text)
     # Phase 3A-1: via AnthropicAdapter (same client the caller passes).
     from agents.providers import AnthropicAdapter, ModelRequest
 
@@ -282,6 +279,47 @@ def summarize_with_anthropic(
         max_tokens=summary_max_tokens,
     ))
     return response.text
+
+
+def summarize_with_model(
+    model_runtime,
+    *,
+    previous_summary: str,
+    history_text: str,
+    summary_max_tokens: int,
+) -> str:
+    """Provider-aware summarizer (Phase 3C-3C).
+
+    Uses the Parent's frozen ModelRuntimeContext: creates its OWN adapter
+    (ctx.create_adapter(), never sharing the Parent's) and sends
+    ``model=ctx.model_id`` — the single source of truth. A DeepSeek agent
+    therefore summarizes with DeepSeek, never silently requiring an
+    Anthropic credential.
+    """
+    prompt = _build_summary_prompt(previous_summary, history_text)
+    from agents.providers import ModelRequest
+
+    adapter = model_runtime.create_adapter()
+    response = adapter.complete(ModelRequest(
+        model=model_runtime.model_id,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=summary_max_tokens,
+    ))
+    return response.text
+
+
+def _build_summary_prompt(previous_summary: str, history_text: str) -> str:
+    return (
+        "Update the rolling conversation summary for continuity.\n\n"
+        "Rules:\n"
+        "- Preserve important goals, decisions, open tasks, file paths, and current state.\n"
+        "- Merge the previous summary with the older history; do not restart from scratch.\n"
+        "- Protected user preferences and long-term memory are preserved separately, "
+        "so do not rewrite or override them here.\n"
+        "- Keep the result concise and useful for the next model call.\n\n"
+        f"<previous_summary>\n{previous_summary or '(none)'}\n</previous_summary>\n\n"
+        f"<older_history>\n{history_text}\n</older_history>"
+    )
 
 
 def _extract_memory_layers(
