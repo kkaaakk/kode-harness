@@ -230,3 +230,86 @@ Adapter
 ```
 
 binding 持有 endpoint 配置（base_url / api_key_env），ModelSpec 不持有。
+
+## 11. Phase 3C 封板（3C-final 收口）
+
+### Runtime propagation matrix（3C-final 锁定）
+
+| Parent Model    | Main     | Subagent | Team     | Compression | TokenBudget |
+| --------------- | -------- | -------- | -------- | ----------- | ----------- |
+| Claude          | Claude   | Claude   | Claude   | Claude      | Claude      |
+| DeepSeek        | DeepSeek | DeepSeek | DeepSeek | DeepSeek    | DeepSeek    |
+| OpenRouter/Qwen | Qwen     | Qwen     | Qwen     | Qwen        | Qwen        |
+
+契约（`tests/test_harness_runtime_propagation_matrix.py` 锁定）：
+
+```text
+所有 Runtime：model_id == Parent ModelRuntimeContext.model_id
+但：MainAdapter is not SubagentAdapter is not TeamAdapter
+    is not CompressionAdapter is not TokenBudgetAdapter
+=> 共享 selection，不共享 adapter
+
+Snapshot 语义：外部 ModelRegistry / ProviderRouter 后续变化
+不影响当前 run 的任何 Runtime
+
+无隐藏 Anthropic 依赖：DeepSeek / OpenRouter parent 在
+ANTHROPIC_API_KEY 不存在时，Main/Subagent/Team/Compression/
+TokenBudget 全链路正常
+
+无 CURRENT_MODEL / 无 mutable global runtime context
+```
+
+### Phase 3C 架构快照
+
+```text
+                Session / Agent Run
+                       │
+                       ▼
+                model alias
+                       │
+                 ModelRegistry
+                       │
+                   ModelSpec
+                       │
+                ProviderRouter
+                       │
+               ProviderBinding
+                       │
+              ModelRuntimeContext   (immutable per-run snapshot)
+                       │
+       ┌───────────────┼────────────────┐
+       │               │                │
+      Main         Subagent           Team
+       │               │                │
+       └──────┬────────┴───────┬────────┘
+              │                │
+         Compression      TokenBudget
+              │                │
+              └──── create_adapter() ────┘
+                 （每个 Runtime 各自创建，不共享实例）
+```
+
+### Phase 3C 登记技术债（只登记，不改）
+
+| # | 技术债 | 说明 |
+|---|--------|------|
+| A | `raw_response.content` 是 Anthropic-shaped compatibility bridge | OpenAI Adapter 伪造 Anthropic-style `.content` 供主 Agent 历史回写。长期目标：`ModelResponse` 提供 canonical assistant message/content，业务 Runtime 不再读 `raw_response`。3C-final 不改 |
+| B | Legacy Anthropic fallback | `auto_compact(model_runtime=None)` / `summarize_with_anthropic(...)` 保留为 legacy compatibility API。新 Runtime 路径全部 provider-aware。确认无外部依赖后再删 |
+| C | 缺 ModelLimits | `ModelCapabilities`（能不能）与 `TokenBudgetConfig`（固定预算）分离；未来需 `ModelLimits(context_window, max_output_tokens)`。不与 3D 混做 |
+| D | urllib transport | 见 #5，streaming/async 时再处理 |
+
+### 3C-final 验收
+
+```text
+Runtime propagation matrix 全绿 ✅
+五条 Runtime：共享同一 ModelRuntimeContext selection，各自创建 Adapter ✅
+Snapshot 语义保持 ✅
+非 Anthropic 模型完整 Runtime 不需 Anthropic credential ✅
+无 CURRENT_MODEL / 无 mutable global runtime context ✅
+剩余 Anthropic coupling 已登记为 compatibility debt ✅
+3A / 3B / Stage 2 契约全绿，0 新增回归 ✅
+```
+
+**Phase 3C 正式封板。** 下一步 3D `/model`：
+`/model` 修改的是 Session 下一次运行使用的 model alias，不修改当前正在运行的
+ModelRuntimeContext（与 immutable per-run snapshot 完全吻合）。
