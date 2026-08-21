@@ -254,5 +254,313 @@ class NoHiddenAnthropicDependencyFinalTests(unittest.TestCase):
                 os.environ["ANTHROPIC_API_KEY"] = saved
 
 
+# ---------------------------------------------------------------------------
+# End-to-end: Claude -> DeepSeek -> Claude with the SAME history through
+# the REAL agent_loop path (not just codec functions). This is the
+# ultimate Phase 3 proof: tool calls/results produced by one provider's
+# run must be consumed by the next provider's run.
+# ---------------------------------------------------------------------------
+
+import importlib.util
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MODULE_PATH = REPO_ROOT / "agents" / "harness_core.py"
+
+
+def load_harness_module(temp_cwd: Path):
+    fake_anthropic = types.ModuleType("anthropic")
+
+    class FakeAnthropic:
+        def __init__(self, *args, **kwargs):
+            self.messages = types.SimpleNamespace(create=None)
+
+    fake_dotenv = types.ModuleType("dotenv")
+    setattr(fake_anthropic, "Anthropic", FakeAnthropic)
+    setattr(fake_dotenv, "load_dotenv", lambda override=True: None)
+
+    previous_anthropic = sys.modules.get("anthropic")
+    previous_dotenv = sys.modules.get("dotenv")
+    previous_cwd = Path.cwd()
+    added_paths = []
+    for path in (REPO_ROOT, REPO_ROOT / "agents"):
+        text = str(path)
+        if text not in sys.path:
+            sys.path.insert(0, text)
+            added_paths.append(text)
+    spec = importlib.util.spec_from_file_location(
+        "harness_core_phase3_final_test", MODULE_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load {MODULE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+
+    sys.modules["anthropic"] = fake_anthropic
+    sys.modules["dotenv"] = fake_dotenv
+    previous_model_id = os.environ.get("MODEL_ID")
+    os.environ["MODEL_ID"] = "test-model"
+    previous_config = sys.modules.get("agents.config")
+    sys.modules.pop("agents.config", None)
+    try:
+        os.chdir(temp_cwd)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        os.chdir(previous_cwd)
+        if previous_model_id is None:
+            os.environ.pop("MODEL_ID", None)
+        else:
+            os.environ["MODEL_ID"] = previous_model_id
+        sys.modules.pop("agents.config", None)
+        if previous_config is not None:
+            sys.modules["agents.config"] = previous_config
+        if previous_anthropic is None:
+            sys.modules.pop("anthropic", None)
+        else:
+            sys.modules["anthropic"] = previous_anthropic
+        if previous_dotenv is None:
+            sys.modules.pop("dotenv", None)
+        else:
+            sys.modules["dotenv"] = previous_dotenv
+        for path in added_paths:
+            try:
+                sys.path.remove(path)
+            except ValueError:
+                pass
+
+
+class _Block:
+    type = "text"
+
+    def __init__(self, text):
+        self.text = text
+
+
+class _ToolUse:
+    type = "tool_use"
+
+    def __init__(self, tool_id, name, tool_input):
+        self.id = tool_id
+        self.name = name
+        self.input = tool_input
+
+
+def _anthropic_resp(content, stop_reason):
+    return types.SimpleNamespace(
+        stop_reason=stop_reason, content=content, usage=None)
+
+
+def _openai_resp(content=None, tool_calls=None, finish="stop"):
+    message = {"role": "assistant", "content": content}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    return {
+        "id": "x",
+        "choices": [{"index": 0, "message": message,
+                     "finish_reason": finish}],
+    }
+
+
+class CrossProviderEndToEndTests(unittest.TestCase):
+    """The Phase 3 ultimate test: three agent_loop runs on the SAME
+    messages list, switching provider mid-stream via /model, with a full
+    tool call/result round on each side.
+
+        Run 1 (Claude):   user -> tool_call A -> tool_result A -> text
+        /model deepseek
+        Run 2 (DeepSeek): reads Claude history -> tool_call B ->
+                          tool_result B -> text
+        /model claude
+        Run 3 (Claude):   reads Claude + DeepSeek history -> text
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.module = load_harness_module(Path(self._tmp.name))
+
+        # Registry + router for claude / deepseek / qwen-openrouter.
+        from agents.providers.model_spec import ModelRegistry, ModelSpec
+        from agents.providers.provider_router import (
+            ProviderBinding, ProviderRouter)
+        from agents.providers.openai_compatible_adapter import (
+            OpenAICompatibleAdapter, OpenAICompatibleConfig)
+
+        self.reg = ModelRegistry()
+        self.reg.register(ModelSpec(alias="claude", provider="anthropic",
+                                    model_id="claude-x"))
+        self.reg.register(ModelSpec(alias="deepseek", provider="deepseek",
+                                    model_id="deepseek-chat"))
+        self.reg.register(ModelSpec(alias="qwen-openrouter",
+                                    provider="openrouter",
+                                    model_id="qwen/qwen-2.5-72b-instruct"))
+
+        # Per-run OpenAI response queues keyed by provider.
+        self.openai_queues = {"deepseek": [], "openrouter": []}
+        self.openai_seen = []  # every OpenAI payload model
+
+        class FakeOCClient:
+            def __init__(self, owner, queue):
+                self.owner = owner
+                self.queue = queue
+
+            def complete(self, payload):
+                self.owner.openai_seen.append(payload)
+                if not self.queue:
+                    return _openai_resp(content="(no more) - done")
+                return self.queue.pop(0)
+
+        def make_factory(provider):
+            def factory(model_id):
+                config = OpenAICompatibleConfig(
+                    base_url=f"https://{provider}.example.invalid",
+                    api_key="test-key", model=model_id)
+                adapter = OpenAICompatibleAdapter(config)
+                queue = self.openai_queues[provider]
+                adapter._client_provider = lambda: FakeOCClient(
+                    self, queue)  # noqa: SLF001
+                return adapter
+            return factory
+
+        self.router = ProviderRouter()
+        self.router.register(ProviderBinding(
+            provider="anthropic", adapter_type="anthropic",
+            adapter_factory=lambda model_id: self.module.ANTHROPIC_ADAPTER))
+        self.router.register(ProviderBinding(
+            provider="deepseek", adapter_type="openai-compatible",
+            base_url="https://deepseek.example.invalid",
+            adapter_factory=make_factory("deepseek")))
+        self.router.register(ProviderBinding(
+            provider="openrouter", adapter_type="openai-compatible",
+            base_url="https://openrouter.example.invalid",
+            adapter_factory=make_factory("openrouter")))
+
+        self.session = None
+        self.messages = []
+
+    def _make_anthropic_client(self, responses):
+        q = list(responses)
+
+        def create(**kwargs):
+            if not q:
+                return _anthropic_resp([_Block("done")], "end_turn")
+            return q.pop(0)
+
+        self.module.client.messages.create = create
+
+    def _switch(self, alias):
+        from agents.session import handle_model_command
+        handle_model_command(f"/model {alias}", self.session, self.reg)
+
+    def _run(self):
+        self.module.agent_loop(
+            self.messages,
+            model_registry=self.reg,
+            provider_router=self.router,
+            session=self.session,
+        )
+
+    # ------------------------------------------------------------------
+
+    def test_three_run_cross_provider_tool_history(self):
+        from agents.session import SessionState
+        self.session = SessionState()
+
+        # --- Run 1: Claude. tool_call A -> tool_result A -> final ---
+        self._make_anthropic_client([
+            _anthropic_resp(
+                [_ToolUse("toolu_A", "read_file", {"path": "x.py"})],
+                "tool_use"),
+            _anthropic_resp([_Block("claude final")], "end_turn"),
+        ])
+        self.messages = [{"role": "user", "content": "read x.py"}]
+        self._run()
+
+        # Claude history now has tool_call A + tool_result A.
+        roles = [m["role"] for m in self.messages]
+        self.assertEqual(roles, ["user", "assistant", "user", "assistant"])
+        self.assertIn("claude final",
+                      self.messages[-1]["content"][0].text)
+        tool_result_A = self.messages[2]["content"][0]
+        self.assertEqual(tool_result_A["tool_use_id"], "toolu_A")
+
+        # --- switch to DeepSeek ---
+        self._switch("deepseek")
+
+        # --- Run 2: DeepSeek. It must read Claude's history (toolu_A),
+        # then produce tool_call B -> tool_result B -> final. ---
+        self.openai_queues["deepseek"] = [
+            _openai_resp(
+                content="deepseek reading",
+                tool_calls=[{
+                    "id": "call_B", "type": "function",
+                    "function": {"name": "bash",
+                                 "arguments": '{"command": "echo B"}'},
+                }],
+                finish="tool_calls"),
+            _openai_resp(content="deepseek final"),
+        ]
+        self._run()
+
+        # DeepSeek run added assistant (tool_call B) + user (tool_result B)
+        # + assistant (final). History still contains Claude's earlier parts.
+        self.assertEqual(self.messages[-1]["role"], "assistant")
+        self.assertIn("deepseek final",
+                      self.messages[-1]["content"][0].text)
+
+        # The OpenAI request payload for Run 2 must have carried Claude's
+        # toolu_A id across the provider boundary.
+        ds_payload = next(
+            p for p in self.openai_seen
+            if p.get("model") == "deepseek-chat")
+        wire_roles = [m["role"] for m in ds_payload["messages"]]
+        self.assertIn("tool", wire_roles)
+        # Claude's toolu_A appears as a tool message for DeepSeek.
+        tool_msgs = [m for m in ds_payload["messages"]
+                     if m.get("role") == "tool"]
+        self.assertTrue(any(m["tool_call_id"] == "toolu_A"
+                            for m in tool_msgs),
+                        "DeepSeek must see Claude's toolu_A result")
+
+        # --- switch back to Claude ---
+        self._switch("claude")
+
+        # --- Run 3: Claude. Reads Claude + DeepSeek history, answers. ---
+        self._make_anthropic_client([
+            _anthropic_resp([_Block("claude after both")], "end_turn"),
+        ])
+        self._run()
+        self.assertEqual(self.messages[-1]["role"], "assistant")
+        self.assertIn("claude after both",
+                      self.messages[-1]["content"][0].text)
+
+        # Session selection went deepseek -> claude across the two switches.
+        self.assertEqual(self.session.model_alias, "claude")
+
+    def test_three_run_events_exactly_two(self):
+        from agents.session import SessionState
+        from agents.types.events import Event
+
+        class Ex:
+            def __init__(self):
+                self.events = []
+
+            def emit(self, name, ctx):
+                self.events.append(name)
+
+        exts = Ex()
+        self.session = SessionState()
+        from agents.session import handle_model_command
+        handle_model_command("/model deepseek", self.session, self.reg,
+                             extensions=exts)
+        handle_model_command("/model claude", self.session, self.reg,
+                             extensions=exts)
+        self.assertEqual(exts.events, [Event.MODEL_CHANGED,
+                                       Event.MODEL_CHANGED])
+
+
 if __name__ == "__main__":
     unittest.main()
